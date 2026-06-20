@@ -1,68 +1,27 @@
 import random
 import streamlit as st
 
-def get_range_for_difficulty(difficulty: str):
-    if difficulty == "Easy":
-        return 1, 20
-    if difficulty == "Normal":
-        return 1, 100
-    if difficulty == "Hard":
-        return 1, 50
-    return 1, 100
+# FIX: Refactored the game logic out of app.py into logic_utils.py while
+# pair-debugging with Claude Code (agent mode), so the functions can be
+# unit-tested without Streamlit. app.py now imports them from there.
+from logic_utils import (
+    get_range_for_difficulty,
+    parse_guess,
+    check_guess,
+    update_score,
+)
 
-
-def parse_guess(raw: str):
-    if raw is None:
-        return False, None, "Enter a guess."
-
-    if raw == "":
-        return False, None, "Enter a guess."
-
-    try:
-        if "." in raw:
-            value = int(float(raw))
-        else:
-            value = int(raw)
-    except Exception:
-        return False, None, "That is not a number."
-
-    return True, value, None
-
-
-def check_guess(guess, secret):
-    if guess == secret:
-        return "Win", "🎉 Correct!"
-
-    try:
-        if guess > secret:
-            return "Too High", "📈 Go HIGHER!"
-        else:
-            return "Too Low", "📉 Go LOWER!"
-    except TypeError:
-        g = str(guess)
-        if g == secret:
-            return "Win", "🎉 Correct!"
-        if g > secret:
-            return "Too High", "📈 Go HIGHER!"
-        return "Too Low", "📉 Go LOWER!"
-
-
-def update_score(current_score: int, outcome: str, attempt_number: int):
-    if outcome == "Win":
-        points = 100 - 10 * (attempt_number + 1)
-        if points < 10:
-            points = 10
-        return current_score + points
-
-    if outcome == "Too High":
-        if attempt_number % 2 == 0:
-            return current_score + 5
-        return current_score - 5
-
-    if outcome == "Too Low":
-        return current_score - 5
-
-    return current_score
+# FIX (Bug 1 - backwards hints): The AI (Claude Code) spotted that the
+# original "Too High"/"Too Low" messages told the player to move the WRONG
+# way. We worked together to pull the advice into this outcome->message map
+# so the hint always points toward the secret.
+# Hint shown for each outcome. The advice must point toward the secret:
+# if the guess was too high, the player should go LOWER, and vice versa.
+HINT_MESSAGES = {
+    "Win": "🎉 Correct!",
+    "Too High": "📉 Go LOWER!",
+    "Too Low": "📈 Go HIGHER!",
+}
 
 st.set_page_config(page_title="Glitchy Guesser", page_icon="🎮")
 
@@ -93,7 +52,10 @@ if "secret" not in st.session_state:
     st.session_state.secret = random.randint(low, high)
 
 if "attempts" not in st.session_state:
-    st.session_state.attempts = 1
+    # FIX (Bug 2 - can never win): I asked the AI why "Attempts left" looked
+    # off by one; it traced the counter starting at 1 instead of 0. Changed
+    # to 0 so attempt #1 is the first real guess.
+    st.session_state.attempts = 0
 
 if "score" not in st.session_state:
     st.session_state.score = 0
@@ -106,8 +68,11 @@ if "history" not in st.session_state:
 
 st.subheader("Make a guess")
 
+# FIX (Bug 2 - can never win): The banner hardcoded "between 1 and 100"
+# even in Easy/Hard mode. Working with the AI, we swapped in the real
+# low/high from get_range_for_difficulty so the displayed range is correct.
 st.info(
-    f"Guess a number between 1 and 100. "
+    f"Guess a number between {low} and {high}. "
     f"Attempts left: {attempt_limit - st.session_state.attempts}"
 )
 
@@ -132,8 +97,18 @@ with col3:
     show_hint = st.checkbox("Show hint", value=True)
 
 if new_game:
+    # FIX (Bug 3 - New Game freeze): The AI diagnosed that the original only
+    # reset `attempts` and `secret`, leaving a stale `status` that tripped
+    # the st.stop() guard below. We agreed to reset ALL per-game state here
+    # and to use the difficulty range instead of a hardcoded 1-100.
+    # Reset ALL per-game state, not just some of it, so the game can
+    # actually restart after a win or loss. Use the difficulty range
+    # for the new secret instead of a hardcoded 1-100.
     st.session_state.attempts = 0
-    st.session_state.secret = random.randint(1, 100)
+    st.session_state.secret = random.randint(low, high)
+    st.session_state.score = 0
+    st.session_state.status = "playing"
+    st.session_state.history = []
     st.success("New game started.")
     st.rerun()
 
@@ -155,12 +130,8 @@ if submit:
     else:
         st.session_state.history.append(guess_int)
 
-        if st.session_state.attempts % 2 == 0:
-            secret = str(st.session_state.secret)
-        else:
-            secret = st.session_state.secret
-
-        outcome, message = check_guess(guess_int, secret)
+        outcome = check_guess(guess_int, st.session_state.secret)
+        message = HINT_MESSAGES[outcome]
 
         if show_hint:
             st.warning(message)
